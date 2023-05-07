@@ -11,27 +11,9 @@ MAXIMUM_ASK = 2 ** 31 - 1
 TOP_LEVEL_COUNT = 5
 
 
-class IOrderListener(object):
-    def on_order_amended(self, now: float, order, volume_removed: int) -> None:
-        """Called when the order is amended."""
-        pass
-
-    def on_order_cancelled(self, now: float, order, volume_removed: int) -> None:
-        """Called when the order is cancelled."""
-        pass
-
-    def on_order_placed(self, now: float, order) -> None:
-        """Called when a good-for-day order is placed in the order book."""
-        pass
-
-    def on_order_filled(self, now: float, order, price: int, volume: int, fee: int) -> None:
-        """Called when the order is partially or completely filled."""
-        pass
-
-
 class Order(object):
     """A request to buy or sell at a given price."""
-    __slots__ = ("client_order_id", "instrument", "lifespan", "listener", "price", "remaining_volume", "side",
+    __slots__ = ("client_order_id", "instrument", "lifespan", "price", "remaining_volume", "side",
                  "total_fees", "volume")
 
     def __init__(self, client_order_id: int, instrument: Instrument, lifespan: Lifespan, side: Side, price: int,
@@ -45,7 +27,6 @@ class Order(object):
         self.remaining_volume: int = volume
         self.total_fees: int = 0
         self.volume: int = volume
-        self.listener: IOrderListener = listener
 
     def __str__(self):
         """Return a string containing a description of this order object."""
@@ -99,8 +80,6 @@ class OrderBook(object):
             self.remove_volume_from_level(order.price, diff, order.side)
             order.volume -= diff
             order.remaining_volume -= diff
-            if order.listener:
-                order.listener.on_order_amended(now, order, diff)
 
     def best_ask(self) -> Optional[int]:
         """Return the current best ask price, or None if there are no ask orders."""
@@ -119,8 +98,6 @@ class OrderBook(object):
             self.remove_volume_from_level(order.price, order.remaining_volume, order.side)
             remaining = order.remaining_volume
             order.remaining_volume = 0
-            if order.listener:
-                order.listener.on_order_cancelled(now, order, remaining)
 
     def insert(self, now: float, order: Order) -> None:
         """
@@ -139,8 +116,6 @@ class OrderBook(object):
             if order.lifespan == Lifespan.FILL_AND_KILL:
                 remaining = order.remaining_volume
                 order.remaining_volume = 0
-                if order.listener:
-                    order.listener.on_order_cancelled(now, order, remaining)
             else:
                 self.place(now, order)
 
@@ -172,9 +147,6 @@ class OrderBook(object):
 
         self.__levels[price].append(order)
         self.__total_volumes[price] += order.remaining_volume
-
-        if order.listener:
-            order.listener.on_order_placed(now, order)
 
     def remove_volume_from_level(self, price: int, volume: int, side: Side) -> None:
         """
@@ -273,8 +245,6 @@ class OrderBook(object):
             remaining -= volume
             passive.remaining_volume -= volume
             passive.total_fees += fee
-            if passive.listener:
-                passive.listener.on_order_filled(now, passive, best_price, volume, fee)
 
         self.__total_volumes[best_price] = total_volume
         traded_volume_at_this_level: int = order.remaining_volume - remaining
@@ -287,37 +257,10 @@ class OrderBook(object):
         fee: int = round(best_price * traded_volume_at_this_level * self.taker_fee)
         order.remaining_volume = remaining
         order.total_fees += fee
-        if order.listener:
-            order.listener.on_order_filled(now, order, best_price, traded_volume_at_this_level, fee)
 
         self.__last_traded_price = best_price
         for callback in self.trade_occurred:
             callback(self)
-
-    def trade_ticks(self, ask_prices: List[int], ask_volumes: List[int], bid_prices: List[int],
-                    bid_volumes: List[int]) -> bool:
-        """
-        Return True and populate the lists if there have been trades.
-        如果最优的 TOP_LEVEL_COUNT 档存在订单则返回True并清空 self.__ask_ticks 和 self.__bid_ticks
-        如果没有则返回False
-        """
-        if self.__ask_ticks or self.__bid_ticks:
-            prices = sorted(self.__ask_ticks.keys())[:TOP_LEVEL_COUNT]
-            volumes = tuple(self.__ask_ticks[p] for p in prices)
-            ask_prices[:] = prices + [0] * (TOP_LEVEL_COUNT - len(prices))
-            ask_volumes[:] = volumes + (0,) * (TOP_LEVEL_COUNT - len(volumes))
-
-            prices = sorted(self.__bid_ticks.keys(), reverse=True)[:TOP_LEVEL_COUNT]
-            volumes = tuple(self.__bid_ticks[p] for p in prices)
-            bid_prices[:] = prices + [0] * (TOP_LEVEL_COUNT - len(prices))
-            bid_volumes[:] = volumes + (0,) * (TOP_LEVEL_COUNT - len(volumes))
-
-            self.__ask_ticks.clear()
-            self.__bid_ticks.clear()
-
-            return True
-
-        return False
 
     def try_trade(self, side: Side, limit_price: int, volume: int) -> Tuple[int, int]:
         """
