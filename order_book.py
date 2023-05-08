@@ -3,7 +3,7 @@ import collections
 
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
-from .order_types import Instrument, Lifespan, Side
+from order_types import Instrument, Lifespan, Side
 
 
 MINIMUM_BID = 1
@@ -12,15 +12,12 @@ TOP_LEVEL_COUNT = 5
 
 
 class Order(object):
-    """A request to buy or sell at a given price."""
-    __slots__ = ("client_order_id", "instrument", "lifespan", "price", "remaining_volume", "side",
-                 "total_fees", "volume")
 
-    def __init__(self, client_order_id: int, instrument: Instrument, lifespan: Lifespan, side: Side, price: int,
-                 volume: int, listener: Optional[IOrderListener] = None):
+    def __init__(self, client_order_id: int, side: Side, price: int, volume: int, instrument: str,
+                 lifespan: Lifespan = Lifespan.G):
         """Initialise a new instance of the Order class."""
         self.client_order_id: int = client_order_id
-        self.instrument: Instrument = instrument
+        self.instrument: str = instrument
         self.lifespan: Lifespan = lifespan
         self.side: Side = side
         self.price: int = price
@@ -29,23 +26,22 @@ class Order(object):
         self.volume: int = volume
 
     def __str__(self):
-        """Return a string containing a description of this order object."""
-        args = (self.client_order_id, self.instrument, self.lifespan.name, self.side.name, self.price, self.volume,
-                self.remaining_volume, self.total_fees)
-        s = "{client_order_id=%d, instrument=%s, lifespan=%s, side=%s, price=%d, volume=%d, remaining=%d, "\
-            "total_fees=%d}"
-        return s % args
-
+        """Return a string representation of this order."""
+        return (str(self.remaining_volume)+ '@'+ str(self.price)+ '#'+ str(self.client_order_id))
+    
+    def order_description(self):
+        return (str(self.remaining_volume)+ '@'+ str(self.price)+ '#'+ str(self.client_order_id))
 
 class OrderBook(object):
     """A collection of orders arranged by the price-time priority principle."""
 
-    def __init__(self, instrument: Instrument, maker_fee: float, taker_fee: float):
+    def __init__(self, instrument: str, maker_fee: float = -0.0003, taker_fee: float = -0.0003):
         """Initialise a new instance of the OrderBook class."""
-        self.instrument: Instrument = instrument
+        self.instrument: str = instrument
         self.maker_fee: float = maker_fee
         self.taker_fee: float = taker_fee
 
+        # Init to later construct
         self.__ask_prices: List[int] = []
         self.__ask_ticks: Dict[int, int] = collections.defaultdict(int)
         self.__bid_prices: List[int] = []
@@ -54,40 +50,24 @@ class OrderBook(object):
         self.__levels: Dict[int, Deque[Order]] = {}         # 字典，对应价格以及order队列
         self.__total_volumes: Dict[int, int] = {}           # 字典，记录价格对应的所有订单量
 
-        # Signals
-        self.trade_occurred: List[Callable[[Any], None]] = list()
-
     def __str__(self):
         """Return a string representation of this order book."""
-        ask_prices = [0] * TOP_LEVEL_COUNT
-        ask_volumes = [0] * TOP_LEVEL_COUNT
-        bid_prices = [0] * TOP_LEVEL_COUNT
-        bid_volumes = [0] * TOP_LEVEL_COUNT
-        self.top_levels(ask_prices, ask_volumes, bid_prices, bid_volumes)
-        return ("BidVol\tPrice\tAskVol\n"
-                + "\n".join("\t%dc\t%6d" % (p, v) for p, v in zip(reversed(ask_prices), reversed(ask_volumes)) if p)
-                + "\n" + "\n".join("%6d\t%dc" % (v, p) for p, v in zip(bid_prices, bid_volumes) if p))
-
-    def amend(self, now: float, order: Order, new_volume: int) -> None:
-        """
-        Amend an order in this order book by decreasing its volume.
-        通过减少现有订单量来修改订单（只能减少订单（因为增加订单量涉及排队先后问题））
-        如果已经成交的成交量要高于希望修改的新订单量，那我们实际上只能取消该订单
-        """
-        if order.remaining_volume > 0:
-            fill_volume = order.volume - order.remaining_volume
-            diff = order.volume - (fill_volume if new_volume < fill_volume else new_volume)
-            self.remove_volume_from_level(order.price, diff, order.side)
-            order.volume -= diff
-            order.remaining_volume -= diff
-
-    def best_ask(self) -> Optional[int]:
-        """Return the current best ask price, or None if there are no ask orders."""
-        return -self.__ask_prices[-1] if self.__ask_prices else None
-
-    def best_bid(self) -> Optional[int]:
-        """Return the current best ask price, or None if there are no ask orders."""
-        return self.__bid_prices[-1] if self.__bid_prices else None
+        S = []
+        B = []
+        if self.__ask_prices:   # for S
+            for i in range(len(self.__ask_prices)):
+                price = self.__ask_prices[-(i+1)]
+                orders_at_this_level = self.__levels[-price]
+                for order in orders_at_this_level:
+                    S.append(order.order_description())
+        if self.__bid_prices:   # for B
+            for i in range(len(self.__bid_prices)):
+                price = self.__bid_prices[-(i+1)]
+                orders_at_this_level = self.__levels[price]
+                for order in orders_at_this_level:
+                    B.append(order.order_description())
+        return ('B:'+str(B)+"\n"+ 
+                'S:'+ str(S))
 
     def cancel(self, now: float, order: Order) -> None:
         """
@@ -118,16 +98,6 @@ class OrderBook(object):
                 order.remaining_volume = 0
             else:
                 self.place(now, order)
-
-    def last_traded_price(self) -> Optional[int]:
-        """Return the last traded price."""
-        return self.__last_traded_price
-
-    def midpoint_price(self) -> Optional[float]:
-        """Return the midpoint price."""
-        if self.__bid_prices and self.__ask_prices:
-            return (self.__bid_prices[-1] + -self.__ask_prices[-1]) / 2.0
-        return None
 
     def place(self, now: float, order: Order) -> None:
         """
@@ -165,35 +135,6 @@ class OrderBook(object):
                 self.__bid_prices.pop(bisect(self.__bid_prices, price) - 1)
         else:
             self.__total_volumes[price] -= volume
-
-    def top_levels(self, ask_prices: List[int], ask_volumes: List[int], bid_prices: List[int],
-                   bid_volumes: List[int]) -> None:
-        """
-        Populate the supplied lists with the top levels for this book.
-        获取最优 TOP_LEVEL_COUNT 数量的订单报价以及数量
-        如果订单薄是稀疏的 只会获取有单的 TOP_LEVEL_COUNT 档订单
-        """
-        i = 0
-        j = len(self.__ask_prices) - 1
-        while i < TOP_LEVEL_COUNT and j >= 0:
-            ask_prices[i] = -self.__ask_prices[j]
-            ask_volumes[i] = self.__total_volumes[ask_prices[i]]
-            i += 1
-            j -= 1
-        while i < TOP_LEVEL_COUNT:
-            ask_prices[i] = ask_volumes[i] = 0
-            i += 1
-
-        i = 0
-        j = len(self.__bid_prices) - 1
-        while i < TOP_LEVEL_COUNT and j >= 0:
-            bid_prices[i] = self.__bid_prices[j]
-            bid_volumes[i] = self.__total_volumes[bid_prices[i]]
-            i += 1
-            j -= 1
-        while i < TOP_LEVEL_COUNT:
-            bid_prices[i] = bid_volumes[i] = 0
-            i += 1
 
     def trade_ask(self, now: float, order: Order) -> None:
         """
@@ -259,37 +200,3 @@ class OrderBook(object):
         order.total_fees += fee
 
         self.__last_traded_price = best_price
-        for callback in self.trade_occurred:
-            callback(self)
-
-    def try_trade(self, side: Side, limit_price: int, volume: int) -> Tuple[int, int]:
-        """
-        Return the volume that would trade and the average price per lot for
-        the requested trade without changing the order book.
-        在不更改订单簿的情况下返回所请求交易的交易量和每手平均价格。
-        """
-        total_volume: int = 0
-        total_value: int = 0
-
-        if side == Side.ASK:
-            i = len(self.__bid_prices) - 1
-            while total_volume < volume and i >= 0 and self.__bid_prices[i] and self.__bid_prices[i] >= limit_price:
-                price: int = self.__bid_prices[i]
-                available: int = self.__total_volumes[price]
-                required: int = volume - total_volume
-                weight: int = required if required <= available else available
-                total_volume += weight
-                total_value += weight * price
-                i -= 1
-        else:
-            i = len(self.__ask_prices) - 1
-            while total_volume < volume and i >= 0 and -self.__ask_prices[i] and -self.__ask_prices[i] <= limit_price:
-                price: int = -self.__ask_prices[i]
-                available: int = self.__total_volumes[price]
-                required: int = volume - total_volume
-                weight: int = required if required <= available else available
-                total_volume += weight
-                total_value += weight * price
-                i -= 1
-
-        return total_volume, total_value // total_volume if total_volume > 0 else 0
